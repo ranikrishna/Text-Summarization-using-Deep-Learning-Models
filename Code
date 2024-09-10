@@ -1,0 +1,130 @@
+!pip install accelerate -U
+
+!pip install transformers datasets rouge_score nltk tqdm
+
+import torch
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, Seq2SeqTrainingArguments, Seq2SeqTrainer, DataCollatorForSeq2Seq
+from datasets import load_dataset
+from rouge_score import rouge_scorer
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from tqdm import tqdm
+
+# **T5-base:**
+
+model_name = 't5-base'
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# Load the dataset
+dataset = load_dataset('cnn_dailymail', '3.0.0')
+
+dataset=dataset.select(range(2000))
+
+# Print the names of the columns in the dataset
+print(dataset.column_names)
+
+def generate_summary(text, max_length=512):
+    inputs = tokenizer(text, return_tensors='pt', max_length=1024, truncation=True).to(device)
+    summary = model.generate(**inputs, max_length=max_length, num_beams=4, length_penalty=2.0)
+    summary_text = tokenizer.decode(summary[0], skip_special_tokens=True)
+    return summary_text
+
+from tqdm.auto import tqdm
+
+scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+smoother = SmoothingFunction()
+
+rouge_scores = []
+bleu_scores = []
+
+for article, reference in tqdm(zip(dataset['article'], dataset['highlights']), total=len(dataset)):
+    summary = generate_summary(article)
+    rouge_scores.append(scorer.score(reference, summary))
+    bleu_scores.append(sentence_bleu([reference.split()], summary.split(), smoothing_function=smoother.method1))
+
+avg_rouge1 = sum([score['rouge1'].fmeasure for score in rouge_scores]) / len(rouge_scores)
+avg_rouge2 = sum([score['rouge2'].fmeasure for score in rouge_scores]) / len(rouge_scores)
+avg_rougeL = sum([score['rougeL'].fmeasure for score in rouge_scores]) / len(rouge_scores)
+
+print(f"Average ROUGE-1: {avg_rouge1:.4f}")
+print(f"Average ROUGE-2: {avg_rouge2:.4f}")
+print(f"Average ROUGE-L: {avg_rougeL:.4f}")
+
+avg_bleu = sum(bleu_scores) / len(bleu_scores)
+print(f"Average BLEU: {avg_bleu:.4f}")
+
+# **TRAINING:**
+
+model_name = 't5-base'
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+def preprocess_data(example):
+    inputs = tokenizer(example['article'], padding='max_length', truncation=True, max_length=512)
+    outputs = tokenizer(example['highlights'], padding='max_length', truncation=True, max_length=150)
+    return {'input_ids': inputs['input_ids'], 'attention_mask': inputs['attention_mask'], 'labels': outputs['input_ids']}
+
+train_dataset = load_dataset('cnn_dailymail', '3.0.0', split="train")
+val_dataset = load_dataset('cnn_dailymail', '3.0.0', split="validation")
+
+train_dataset = train_dataset.map(preprocess_data, batched=True) #whole dataset
+val_dataset = val_dataset.map(preprocess_data, batched=True) # whole dataset
+
+training_args = Seq2SeqTrainingArguments(
+    output_dir="./checkpoints",
+    num_train_epochs=1,
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=4,
+    logging_dir="./logs",
+    logging_steps=100,
+    save_steps=500,
+    evaluation_strategy="steps",
+    eval_steps=500,
+    save_total_limit=3,
+)
+
+data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+
+trainer = Seq2SeqTrainer(
+    model=model,
+    args=training_args,
+    data_collator=data_collator,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
+)
+
+trainer.train()
+
+test_dataset = load_dataset('cnn_dailymail', '3.0.0', split="test")
+
+
+scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+smoother = SmoothingFunction()
+
+rouge_scores = []
+bleu_scores = []
+
+def generate_summary(text, max_length=512):
+    inputs = tokenizer(text, return_tensors='pt', max_length=1024, truncation=True).to(device)
+    summary = model.generate(**inputs, max_length=max_length, num_beams=4, length_penalty=2.0)
+    return tokenizer.decode(summary[0], skip_special_tokens=True)
+
+for article, reference in tqdm(zip(test_dataset['article'], test_dataset['highlights']), total=len(test_dataset)):
+    summary = generate_summary(article)
+    rouge_scores.append(scorer.score(reference, summary))
+    bleu_scores.append(sentence_bleu([reference.split()], summary.split(), smoothing_function=smoother.method1))
+
+avg_rouge1 = sum([score['rouge1'].fmeasure for score in rouge_scores]) / len(rouge_scores)
+avg_rouge2 = sum([score['rouge2'].fmeasure for score in rouge_scores]) / len(rouge_scores)
+avg_rougeL = sum([score['rougeL'].fmeasure for score in rouge_scores]) / len(rouge_scores)
+
+print(f"Average ROUGE-1: {avg_rouge1:.4f}")
+print(f"Average ROUGE-2: {avg_rouge2:.4f}")
+print(f"Average ROUGE-L: {avg_rougeL:.4f}")
+
+avg_bleu = sum(bleu_scores) / len(bleu_scores)
+print(f"Average BLEU: {avg_bleu:.4f}")
